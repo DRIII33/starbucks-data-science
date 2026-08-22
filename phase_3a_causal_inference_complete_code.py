@@ -3,25 +3,48 @@
 PHASE 3A: CAUSAL INFERENCE MODELING - COMPLETE PRODUCTION CODE
 ================================================================================
 
-THIS IS FULL-LENGTH PRODUCTION-READY CODE FOR GOOGLE COLAB
-Copy-paste this entire file into a single Colab cell
+GOOGLE COLAB
+Copy/paste this entire file into a single Colab cell.
 
-Demonstrates:
-✓ Causal Graph Construction (DoWhy)
-✓ Confounding Variable Control
-✓ Backdoor Criterion & Adjustment Sets
-✓ Causal Effect Identification
-✓ Treatment Effect Estimation (Double Machine Learning)
-✓ Robustness Checks & Sensitivity Analysis
-✓ Causal Interpretation & Business Insights
+PURPOSE
+-------
+Estimate the causal effect of PROMO_20 versus CONTROL on daily_net_revenue
+using Double Machine Learning (DML) with EconML LinearDML and LightGBM
+nuisance models.
 
-Key Features:
-✓ Zero divergences - reliable convergence
-✓ Executes in 5-10 minutes on Colab free tier
-✓ Low memory footprint
-✓ Professional visualizations
-✓ Production-ready output artifacts
-✓ Bypasses previous bottlenecks with optimized estimation
+METHODS
+-------
+✓ BigQuery data loading
+✓ Explicit source-schema validation
+✓ Binary treatment definition
+✓ Explicit causal adjustment set
+✓ One-hot encoding of categorical covariates
+✓ DoWhy causal graph construction
+✓ Backdoor identification
+✓ EconML LinearDML
+✓ LightGBM outcome nuisance model
+✓ LightGBM treatment/propensity nuisance model
+✓ Model-based inference
+✓ ATE + 95% confidence interval
+✓ Statistical significance
+✓ CATE / heterogeneous treatment effects
+✓ Market-segment HTE
+✓ Product-category HTE
+✓ Covariate balance diagnostics
+✓ Propensity-score overlap diagnostics
+✓ Causal graph visualization
+✓ ATE comparison visualization
+✓ HTE visualization
+✓ CATE distribution
+✓ Outcome distribution
+✓ Propensity overlap visualization
+✓ CSV + JSON output artifacts
+
+IMPORTANT
+---------
+This version intentionally does NOT silently replace BigQuery data with
+synthetic data if BigQuery access fails. A causal-analysis notebook should
+never silently generate portfolio results from a different dataset.
 
 Author: Starbucks Data Science Portfolio
 Date: August 2026
@@ -29,771 +52,2478 @@ Date: August 2026
 """
 
 # ============================================================================
-# IMPORTS & SETUP
+# IMPORTS & GLOBAL CONFIGURATION
 # ============================================================================
-print("\n" + "="*80)
-print("INITIALIZING PHASE 3A: CAUSAL INFERENCE MODELING")
-print("="*80 + "\n")
 
-import pandas as pd
-import numpy as np
-import warnings
-warnings.filterwarnings('ignore')
-
-# Suppress verbose logging
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-
-print("[1/7] Installing required libraries...")
-import subprocess
 import sys
-
-def install_package(package):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", package])
-
-# Install/verify required packages
-required_packages = {
-    'dowhy': 'dowhy',
-    'econml': 'econml',
-    'networkx': 'networkx',
-    'pydot': 'pydot',
-    'lightgbm': 'lightgbm',
-    'scipy': 'scipy',
-    'matplotlib': 'matplotlib',
-    'google-cloud-bigquery': 'google-cloud-bigquery'
-}
-
-for lib, package in required_packages.items():
-    try:
-        __import__(lib)
-        print(f"  ✓ {lib:20s} already installed")
-    except ImportError:
-        print(f"  → Installing {lib}...")
-        install_package(package)
-        print(f"  ✓ {lib:20s} installed")
-
-print("\n[2/7] Importing libraries...")
-import pymc as pm
-import arviz as az
-from dowhy import CausalModel
-from econml.dml import LinearDML
-from econml.metalearners import DMLCateEstimator
-from lightgbm import LGBMRegressor
-import networkx as nx
-import pydot
-from scipy.optimize import minimize
-from scipy.stats import norm, ttest_ind
-import matplotlib.pyplot as plt
-import seaborn as sns
-from datetime import datetime
 import json
+import subprocess
+import warnings
+from pathlib import Path
+from datetime import datetime
 
-# Set plotting style
-sns.set_style("whitegrid")
-plt.rcParams['figure.figsize'] = (12, 6)
+import numpy as np
+import pandas as pd
 
-print("  ✓ All libraries imported successfully\n")
+warnings.filterwarnings("ignore")
+
+# Reduce unnecessary TensorFlow logging if another dependency imports TF.
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+# ---------------------------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------------------------
+
+RANDOM_STATE = 42
+np.random.seed(RANDOM_STATE)
+
+# ---------------------------------------------------------------------------
+# BigQuery configuration
+# ---------------------------------------------------------------------------
+
+PROJECT_ID = "driiiportfolio-506303"
+DATASET_NAME = "starbucks_transactions"
+TABLE_NAME = "analytics_ready_promo_data"
+
+MAX_ROWS = 100_000
+
+# ---------------------------------------------------------------------------
+# Colab output directory
+# ---------------------------------------------------------------------------
+
+OUTPUT_DIR = Path("/content/phase_3a_outputs")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
 
 # ============================================================================
-# SECTION 1: LOAD DATA FROM BIGQUERY
+# STARTUP
 # ============================================================================
-print("[3/7] Loading data from BigQuery...")
 
-try:
-    from google.cloud import bigquery
-    
-    PROJECT_ID = 'driiiportfolio'
-    DATASET_NAME = 'starbucks_transactions'
-    TABLE_NAME = 'analytics_ready_promo_data'
-    
-    client = bigquery.Client(project=PROJECT_ID)
-    query = f"""
-    SELECT * FROM `{PROJECT_ID}.{DATASET_NAME}.{TABLE_NAME}`
-    ORDER BY transaction_date, store_id, category
-    LIMIT 100000
+print("\n" + "=" * 80)
+print("INITIALIZING PHASE 3A: CAUSAL INFERENCE MODELING")
+print("=" * 80 + "\n")
+
+
+# ============================================================================
+# PACKAGE INSTALLATION
+# ============================================================================
+
+print("[1/7] Installing / verifying required libraries...")
+print("-" * 80)
+
+
+def ensure_package(import_name, pip_name):
     """
-    
-    print(f"  Query: SELECT from {TABLE_NAME}")
-    df_analytics = client.query(query).to_dataframe()
-    print(f"  ✓ Loaded {len(df_analytics):,} rows")
-    print(f"  ✓ Columns: {len(df_analytics.columns)}")
-    
-except Exception as e:
-    print(f"  ⚠ Warning: Could not connect to BigQuery ({str(e)[:50]}...)")
-    print("  → Creating synthetic data as fallback...")
-    
-    # FALLBACK: Create synthetic analytics data
-    np.random.seed(42)
-    n_rows = 10000
-    
-    df_analytics = pd.DataFrame({
-        'transaction_date': pd.date_range('2022-01-01', periods=n_rows, freq='h'),
-        'store_id': np.random.choice([f'STORE_{i:03d}' for i in range(1, 51)], n_rows),
-        'market_segment': np.random.choice(['Urban', 'Suburban', 'Rural'], n_rows, p=[0.4, 0.4, 0.2]),
-        'category': np.random.choice(['Frappuccino', 'Drip Coffee', 'Bakery'], n_rows),
-        'treatment_group': np.random.choice(['CONTROL', 'PROMO_20', 'PROMO_33'], n_rows),
-        'promo_id': np.random.choice(['PROMO_NONE', 'HAPPY_HOUR_20', 'PROMO_33'], n_rows),
-        'discount_pct': np.random.choice([0.0, 0.20, 0.33], n_rows),
-        'base_price': np.tile([5.50, 3.00, 4.00], n_rows // 3 + 1)[:n_rows],
-        'unit_cost': np.tile([1.50, 0.50, 1.20], n_rows // 3 + 1)[:n_rows],
-        'elasticity': np.tile([-2.0, -0.8, -1.5], n_rows // 3 + 1)[:n_rows],
-        'daily_units_sold': np.random.randint(50, 300, n_rows),
-        'daily_net_revenue': np.random.uniform(100, 1500, n_rows),
-        'daily_profit': np.random.uniform(50, 800, n_rows),
-        'rolling_7day_net_revenue': np.random.uniform(500, 8000, n_rows),
-        'rolling_7day_units_sold': np.random.randint(200, 1500, n_rows),
-    })
-    
-    print(f"  ✓ Fallback: Created {len(df_analytics):,} synthetic rows")
+    Import a package if available; otherwise install it with pip.
 
-# Convert transaction_date to datetime if needed
-df_analytics['transaction_date'] = pd.to_datetime(df_analytics['transaction_date'])
+    Parameters
+    ----------
+    import_name : str
+        Python import path.
+    pip_name : str
+        pip package name.
+    """
+    try:
+        __import__(import_name)
+        print(f"  ✓ {pip_name:28s} available")
+    except ImportError:
+        print(f"  → Installing {pip_name}...")
+        subprocess.check_call(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-q",
+                pip_name,
+            ]
+        )
+        print(f"  ✓ {pip_name:28s} installed")
 
-print()
 
-# ============================================================================
-# ============================================================================
-# PHASE 3A: CAUSAL INFERENCE MODELING
-# ============================================================================
-# ============================================================================
-
-print("="*80)
-print("PHASE 3A: CAUSAL INFERENCE MODELING (DOUBLE MACHINE LEARNING)")
-print("="*80 + "\n")
-
-print("[4/7] Preparing data for causal inference...")
-
-# ============================================================================
-# STEP 1: DATA PREPARATION & TREATMENT DEFINITION
-# ============================================================================
-
-print("\n  Step 1: Data Preparation")
-print("-"*80)
-
-# Create binary treatment variable: PROMO_20 vs CONTROL
-df_causal = df_analytics[df_analytics['treatment_group'].isin(['CONTROL', 'PROMO_20'])].copy()
-
-# Binary treatment indicator
-df_causal['treatment'] = (df_causal['treatment_group'] == 'PROMO_20').astype(int)
-
-# Outcome variable
-df_causal['outcome'] = df_causal['daily_net_revenue']
-
-# Define confounders (variables that affect both treatment assignment & outcome)
-confounders = [
-    'base_price',
-    'unit_cost',
-    'elasticity',
-    'rolling_7day_net_revenue',
-    'rolling_7day_units_sold'
+required_packages = [
+    ("dowhy", "dowhy"),
+    ("econml", "econml"),
+    ("networkx", "networkx"),
+    ("pydot", "pydot"),
+    ("lightgbm", "lightgbm"),
+    ("scipy", "scipy"),
+    ("matplotlib", "matplotlib"),
+    ("google.cloud.bigquery", "google-cloud-bigquery"),
 ]
 
-# Encode categorical confounders
-categorical_cols = ['market_segment', 'category']
-for col in categorical_cols:
-    if col in df_causal.columns:
-        dummies = pd.get_dummies(df_causal[col], prefix=col, drop_first=True)
-        df_causal = pd.concat([df_causal, dummies], axis=1)
-        confounder_names = list(dummies.columns)
-        confounders.extend(confounder_names)
+for import_name, pip_name in required_packages:
+    ensure_package(import_name, pip_name)
 
-# Handle missing values
-df_causal[confounders] = df_causal[confounders].fillna(df_causal[confounders].mean())
 
-# Standardize confounders for numerical stability
-for col in confounders:
-    if df_causal[col].std() > 0:
-        df_causal[f'{col}_std'] = (df_causal[col] - df_causal[col].mean()) / df_causal[col].std()
-        confounders_std = [f'{c}_std' if f'{c}_std' in df_causal.columns else c for c in confounders]
+# ============================================================================
+# IMPORTS
+# ============================================================================
 
-confounders = confounders_std if confounders_std else confounders
+print("\n[2/7] Importing libraries...")
+print("-" * 80)
 
-print(f"  ✓ Treatment variable: {df_causal['treatment'].sum()} treated, {(1-df_causal['treatment']).sum()} control")
-print(f"  ✓ Outcome variable: daily_net_revenue")
-print(f"  ✓ Confounders ({len(confounders)}): {', '.join(confounders[:5])}...")
-print(f"  ✓ Total sample size: {len(df_causal):,} observations")
+from google.cloud import bigquery
 
-# Summary statistics
-print("\n  Summary Statistics:")
-print("-"*80)
-print(f"  Control group:")
-print(f"    • Mean outcome: ${df_causal[df_causal['treatment']==0]['outcome'].mean():.2f}")
-print(f"    • Std outcome:  ${df_causal[df_causal['treatment']==0]['outcome'].std():.2f}")
-print(f"  Treatment group (PROMO_20):")
-print(f"    • Mean outcome: ${df_causal[df_causal['treatment']==1]['outcome'].mean():.2f}")
-print(f"    • Std outcome:  ${df_causal[df_causal['treatment']==1]['outcome'].std():.2f}")
+from dowhy import CausalModel
 
-naive_ate = (
-    df_causal[df_causal['treatment']==1]['outcome'].mean() - 
-    df_causal[df_causal['treatment']==0]['outcome'].mean()
+from econml.dml import LinearDML
+
+from lightgbm import (
+    LGBMClassifier,
+    LGBMRegressor,
 )
-print(f"  ⚠ Naive ATE (unadjusted): ${naive_ate:.2f}")
-print(f"    (This is biased - doesn't account for confounding)")
+
+from scipy.stats import norm
+
+import matplotlib.pyplot as plt
+import networkx as nx
+import pydot
+
+
+plt.rcParams["figure.figsize"] = (12, 6)
+
+print("  ✓ All libraries imported successfully")
+
 
 # ============================================================================
-# STEP 2: CAUSAL GRAPH CONSTRUCTION
+# SECTION 1 — LOAD DATA FROM BIGQUERY
 # ============================================================================
 
-print("\n  Step 2: Constructing Causal Graph")
-print("-"*80)
+print("\n[3/7] Loading data from BigQuery...")
+print("-" * 80)
 
-# Define causal relationships based on business logic
+try:
+
+    client = bigquery.Client(project=PROJECT_ID)
+
+    query = f"""
+    SELECT *
+    FROM `{PROJECT_ID}.{DATASET_NAME}.{TABLE_NAME}`
+    ORDER BY transaction_date, store_id, category
+    LIMIT {MAX_ROWS}
+    """
+
+    print(
+        f"  Query source: "
+        f"{PROJECT_ID}.{DATASET_NAME}.{TABLE_NAME}"
+    )
+
+    df_analytics = client.query(query).to_dataframe()
+
+    data_source = "BigQuery"
+
+    print(f"  ✓ Loaded {len(df_analytics):,} rows")
+    print(f"  ✓ Columns: {len(df_analytics.columns)}")
+
+except Exception as exc:
+
+    raise RuntimeError(
+        "\n"
+        "BIGQUERY DATA LOAD FAILED\n"
+        "--------------------------\n"
+        "The production version intentionally does not silently substitute "
+        "synthetic data because doing so could create misleading causal "
+        "results for a portfolio project.\n\n"
+        "Verify:\n"
+        "  1. Colab authentication is active.\n"
+        "  2. The project is accessible.\n"
+        "  3. The dataset exists.\n"
+        "  4. The table exists.\n"
+        "  5. Your account has permission to query it.\n\n"
+        f"Requested table:\n"
+        f"  {PROJECT_ID}.{DATASET_NAME}.{TABLE_NAME}\n\n"
+        f"Original BigQuery error:\n{exc}"
+    ) from exc
+
+
+if df_analytics.empty:
+    raise ValueError(
+        "BigQuery returned zero rows. "
+        "Causal inference cannot proceed."
+    )
+
+
+# ============================================================================
+# SECTION 2 — SOURCE SCHEMA VALIDATION
+# ============================================================================
+
+print("\n[4/7] Validating source schema and preparing causal sample...")
+print("-" * 80)
+
+
+# ---------------------------------------------------------------------------
+# Required columns
+# ---------------------------------------------------------------------------
+
+required_columns = [
+    "transaction_date",
+    "store_id",
+    "market_segment",
+    "category",
+    "treatment_group",
+    "base_price",
+    "unit_cost",
+    "elasticity",
+    "rolling_7day_net_revenue",
+    "rolling_7day_units_sold",
+    "daily_net_revenue",
+]
+
+missing_columns = [
+    column
+    for column in required_columns
+    if column not in df_analytics.columns
+]
+
+if missing_columns:
+
+    raise ValueError(
+        "The BigQuery table is missing required columns:\n"
+        + "\n".join(f"  • {column}" for column in missing_columns)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Date validation
+# ---------------------------------------------------------------------------
+
+df_analytics["transaction_date"] = pd.to_datetime(
+    df_analytics["transaction_date"],
+    errors="coerce",
+)
+
+if df_analytics["transaction_date"].isna().any():
+
+    invalid_dates = int(
+        df_analytics["transaction_date"].isna().sum()
+    )
+
+    raise ValueError(
+        f"transaction_date contains {invalid_dates:,} "
+        "unparseable values."
+    )
+
+
+# ============================================================================
+# CAUSAL SAMPLE DEFINITION
+# ============================================================================
+
+# Original analytical design:
+#
+# Treatment = PROMO_20
+# Control   = CONTROL
+#
+# PROMO_33 is intentionally excluded because this is a binary
+# PROMO_20-versus-CONTROL causal comparison.
+
+df_causal = df_analytics[
+    df_analytics["treatment_group"].isin(
+        ["CONTROL", "PROMO_20"]
+    )
+].copy()
+
+
+if df_causal.empty:
+
+    raise ValueError(
+        "No observations with treatment_group in "
+        "{'CONTROL', 'PROMO_20'} were found."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Binary treatment
+# ---------------------------------------------------------------------------
+
+df_causal["treatment"] = (
+    df_causal["treatment_group"]
+    .eq("PROMO_20")
+    .astype(np.int8)
+)
+
+
+# ---------------------------------------------------------------------------
+# Outcome
+# ---------------------------------------------------------------------------
+
+df_causal["outcome"] = pd.to_numeric(
+    df_causal["daily_net_revenue"],
+    errors="coerce",
+)
+
+
+# ============================================================================
+# TREATMENT / OUTCOME VALIDATION
+# ============================================================================
+
+if df_causal["treatment"].nunique() != 2:
+
+    raise ValueError(
+        "The causal sample must contain both treatment groups:\n"
+        "  CONTROL\n"
+        "  PROMO_20"
+    )
+
+
+if df_causal["outcome"].isna().any():
+
+    invalid_outcomes = int(
+        df_causal["outcome"].isna().sum()
+    )
+
+    raise ValueError(
+        f"Outcome contains {invalid_outcomes:,} "
+        "missing/non-numeric observations."
+    )
+
+
+if not np.isfinite(
+    df_causal["outcome"].to_numpy(dtype=np.float64)
+).all():
+
+    raise ValueError(
+        "Outcome contains infinite values."
+    )
+
+
+# ============================================================================
+# EXPLICIT CAUSAL ADJUSTMENT SET
+# ============================================================================
+
+"""
+The original implementation declared a specific confounder/adjustment set
+but later constructed X using every dataframe column except treatment/outcome.
+
+That was unsafe because it allowed variables such as:
+
+    promo_id
+    discount_pct
+    daily_profit
+    transaction_date
+    store_id
+    treatment_group
+
+to potentially enter the DML feature matrix.
+
+This implementation explicitly defines the variables that may enter X.
+"""
+
+numeric_adjustment_cols = [
+    "base_price",
+    "unit_cost",
+    "elasticity",
+    "rolling_7day_net_revenue",
+    "rolling_7day_units_sold",
+]
+
+categorical_adjustment_cols = [
+    "market_segment",
+    "category",
+]
+
+
+# ---------------------------------------------------------------------------
+# Variables explicitly excluded from X
+# ---------------------------------------------------------------------------
+
+excluded_columns = {
+    "treatment_group",
+    "treatment",
+    "outcome",
+    "daily_net_revenue",
+    "discount_pct",
+    "promo_id",
+    "daily_profit",
+    "transaction_date",
+    "store_id",
+}
+
+
+# ============================================================================
+# NUMERIC FEATURE VALIDATION
+# ============================================================================
+
+for column in numeric_adjustment_cols:
+
+    df_causal[column] = pd.to_numeric(
+        df_causal[column],
+        errors="coerce",
+    )
+
+
+# ============================================================================
+# REQUIRED-VARIABLE MISSINGNESS HANDLING
+# ============================================================================
+
+analysis_columns = (
+    numeric_adjustment_cols
+    + categorical_adjustment_cols
+    + ["treatment", "outcome"]
+)
+
+before_rows = len(df_causal)
+
+df_causal = df_causal.dropna(
+    subset=analysis_columns
+).copy()
+
+rows_dropped = before_rows - len(df_causal)
+
+
+if df_causal.empty:
+
+    raise ValueError(
+        "No complete observations remain after "
+        "required-variable validation."
+    )
+
+
+# ============================================================================
+# CATEGORICAL ENCODING
+# ============================================================================
+
+X_parts = []
+
+
+# ---------------------------------------------------------------------------
+# Numeric adjustment variables
+# ---------------------------------------------------------------------------
+
+numeric_part = (
+    df_causal[numeric_adjustment_cols]
+    .astype(np.float64)
+)
+
+X_parts.append(numeric_part)
+
+
+# ---------------------------------------------------------------------------
+# Categorical adjustment variables
+# ---------------------------------------------------------------------------
+
+for column in categorical_adjustment_cols:
+
+    categorical_values = (
+        df_causal[column]
+        .astype("string")
+    )
+
+    dummies = pd.get_dummies(
+        categorical_values,
+        prefix=column,
+        drop_first=True,
+        dtype=np.float64,
+    )
+
+    if dummies.shape[1] == 0:
+
+        raise ValueError(
+            f"Categorical variable `{column}` "
+            "produced no usable dummy variables."
+        )
+
+    X_parts.append(dummies)
+
+
+# ---------------------------------------------------------------------------
+# Final DML feature matrix
+# ---------------------------------------------------------------------------
+
+X_numeric = pd.concat(
+    X_parts,
+    axis=1,
+)
+
+X_numeric = X_numeric.astype(
+    np.float64
+)
+
+X_numeric = X_numeric.replace(
+    [np.inf, -np.inf],
+    np.nan,
+)
+
+
+# ============================================================================
+# FINAL FEATURE MATRIX VALIDATION
+# ============================================================================
+
+if X_numeric.isna().any().any():
+
+    bad_columns = (
+        X_numeric.columns[
+            X_numeric.isna().any()
+        ]
+        .tolist()
+    )
+
+    raise ValueError(
+        "Adjustment matrix contains NaN/infinite values "
+        f"after encoding. Affected columns: {bad_columns}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Treatment and outcome arrays
+# ---------------------------------------------------------------------------
+
+Y = df_causal["outcome"].to_numpy(
+    dtype=np.float64
+)
+
+T = df_causal["treatment"].to_numpy(
+    dtype=np.int8
+)
+
+
+# ============================================================================
+# DIMENSION VALIDATION
+# ============================================================================
+
+if not (
+    len(X_numeric)
+    == len(Y)
+    == len(T)
+):
+
+    raise RuntimeError(
+        "DIMENSION VALIDATION FAILED\n"
+        f"X rows: {len(X_numeric):,}\n"
+        f"Y rows: {len(Y):,}\n"
+        f"T rows: {len(T):,}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Treatment variation
+# ---------------------------------------------------------------------------
+
+if T.sum() == 0:
+
+    raise ValueError(
+        "No treated observations remain."
+    )
+
+if T.sum() == len(T):
+
+    raise ValueError(
+        "No control observations remain."
+    )
+
+
+# ============================================================================
+# SAMPLE SUMMARY
+# ============================================================================
+
+treated_count = int(
+    (T == 1).sum()
+)
+
+control_count = int(
+    (T == 0).sum()
+)
+
+print(
+    f"  ✓ Treatment: "
+    f"{treated_count:,} treated / "
+    f"{control_count:,} control"
+)
+
+print(
+    "  ✓ Outcome: "
+    "daily_net_revenue"
+)
+
+print(
+    f"  ✓ Explicit adjustment variables: "
+    f"{len(numeric_adjustment_cols) + len(categorical_adjustment_cols)}"
+)
+
+print(
+    f"  ✓ DML features after encoding: "
+    f"{X_numeric.shape[1]}"
+)
+
+print(
+    f"  ✓ Rows retained: "
+    f"{len(df_causal):,}"
+)
+
+print(
+    f"  ✓ Rows dropped for required fields: "
+    f"{rows_dropped:,}"
+)
+
+
+# ============================================================================
+# SUMMARY STATISTICS
+# ============================================================================
+
+control_outcome = (
+    df_causal.loc[
+        T == 0,
+        "outcome"
+    ]
+)
+
+treated_outcome = (
+    df_causal.loc[
+        T == 1,
+        "outcome"
+    ]
+)
+
+control_mean = float(
+    control_outcome.mean()
+)
+
+treated_mean = float(
+    treated_outcome.mean()
+)
+
+naive_ate = float(
+    treated_mean - control_mean
+)
+
+
+print("\n  Summary Statistics:")
+print("-" * 80)
+
+print(
+    f"  Control mean outcome:     "
+    f"${control_mean:.2f}"
+)
+
+print(
+    f"  Treatment mean outcome:   "
+    f"${treated_mean:.2f}"
+)
+
+print(
+    f"  Naive ATE:                "
+    f"${naive_ate:.2f}"
+)
+
+print(
+    "  Note: the naive difference is "
+    "an unadjusted association, not a causal estimate."
+)
+
+
+# ============================================================================
+# SECTION 3 — CAUSAL GRAPH CONSTRUCTION
+# ============================================================================
+
+print("\n[5/7] Constructing causal graph and identifying effect...")
+print("-" * 80)
+
+
 causal_graph_dot = """
 digraph {
+
     rankdir=LR;
-    
-    // Confounders (affect both treatment and outcome)
-    market_segment [label="Market Segment"];
-    category [label="Product Category"];
-    base_price [label="Base Price"];
-    unit_cost [label="Unit Cost"];
-    elasticity [label="Price Elasticity"];
-    
-    // Treatment
-    treatment [label="PROMO_20\nTreatment", shape=box, style=filled, fillcolor=lightblue];
-    
-    // Outcome
-    outcome [label="Daily Net Revenue\n(Outcome)", shape=box, style=filled, fillcolor=lightgreen];
-    
-    // Confounding paths (confounders → both treatment and outcome)
+
     market_segment -> treatment;
     market_segment -> outcome;
-    
+
     category -> treatment;
     category -> outcome;
-    
+
     base_price -> outcome;
     unit_cost -> outcome;
     elasticity -> outcome;
-    
-    // Treatment effect (causal path)
-    treatment -> outcome [color=red, penwidth=2, label="Causal Effect"];
+
+    rolling_7day_net_revenue -> outcome;
+    rolling_7day_units_sold -> outcome;
+
+    treatment -> outcome
+        [color=red, penwidth=2];
+
 }
 """
 
-print("  Causal Graph (DOT format):")
-print("    • Confounders → Treatment (selection bias)")
-print("    • Confounders → Outcome (confounding bias)")
-print("    • Treatment → Outcome (causal effect of interest)")
-
-# Parse and convert DOT to NetworkX
-try:
-    pydot_graph = pydot.graph_from_dot_data(causal_graph_dot)[0]
-    causal_graph_nx = nx.nx_pydot.from_pydot(pydot_graph)
-    print("  ✓ Causal graph successfully parsed")
-except Exception as e:
-    print(f"  ⚠ Graph parsing warning: {str(e)[:50]}")
-    # Create simplified graph
-    causal_graph_nx = nx.DiGraph()
-    causal_graph_nx.add_edges_from([
-        ('market_segment', 'treatment'),
-        ('market_segment', 'outcome'),
-        ('category', 'treatment'),
-        ('category', 'outcome'),
-        ('base_price', 'outcome'),
-        ('unit_cost', 'outcome'),
-        ('elasticity', 'outcome'),
-        ('treatment', 'outcome'),
-    ])
-    print("  ✓ Simplified causal graph created")
 
 # ============================================================================
-# STEP 3: CAUSAL IDENTIFICATION (BACKDOOR CRITERION)
+# PARSE GRAPH
 # ============================================================================
 
-print("\n  Step 3: Identifying Causal Effect")
-print("-"*80)
-
-print("""
-  Identification Strategy: BACKDOOR CRITERION
-  
-  To identify the causal effect of Treatment on Outcome, we must:
-  1. Block all backdoor paths (confounding paths)
-  2. Control for the minimal adjustment set
-  
-  Backdoor Paths:
-    Treatment ← Market_Segment → Outcome
-    Treatment ← Category → Outcome
-  
-  Adjustment Set: {Market_Segment, Category, Base_Price, Unit_Cost, Elasticity}
-  
-  Method: Double Machine Learning (DML)
-    • Robust to model misspecification
-    • Handles high-dimensional confounders
-    • Orthogonalization approach
-""")
-
-# Prepare data for DoWhy
-X = df_causal[[col for col in df_causal.columns if col != 'treatment' and col != 'outcome']]
-T = df_causal['treatment'].values
-Y = df_causal['outcome'].values
-
-print(f"  ✓ X (confounders): shape {X.shape}")
-print(f"  ✓ T (treatment): shape {T.shape}")
-print(f"  ✓ Y (outcome): shape {Y.shape}")
-
-# ============================================================================
-# STEP 4: CAUSAL EFFECT ESTIMATION (DOUBLE MACHINE LEARNING)
-# ============================================================================
-
-print("\n  Step 4: Estimating Causal Effect (Double Machine Learning)")
-print("-"*80)
-
-print("  Using: EconML LinearDML with LightGBM nuisance models")
-print("  • Residualized regression approach")
-print("  • Partialling out confounding through ML nuisance models")
-print("  • Estimates Average Treatment Effect (ATE)")
-
-# Create LinearDML model
-dml_model = LinearDML(
-    model_y=LGBMRegressor(
-        n_estimators=50,
-        max_depth=4,
-        num_leaves=15,
-        min_child_samples=5,
-        random_state=42,
-        verbose=-1
-    ),
-    model_t=LGBMRegressor(
-        n_estimators=50,
-        max_depth=4,
-        num_leaves=15,
-        min_child_samples=5,
-        random_state=42,
-        verbose=-1
-    ),
-    random_state=42
+pydot_graphs = (
+    pydot.graph_from_dot_data(
+        causal_graph_dot
+    )
 )
 
-print("  Fitting DML model (this may take 1-2 minutes)...")
-print("  Progress: ", end="", flush=True)
+if not pydot_graphs:
 
-# Select only numeric confounder columns
-numeric_cols = [col for col in X.columns if X[col].dtype in ['float64', 'int64']]
-X_numeric = X[numeric_cols]
+    raise RuntimeError(
+        "The causal graph DOT specification "
+        "could not be parsed."
+    )
 
-# Fit the model
+
+causal_graph_nx = (
+    nx.nx_pydot.from_pydot(
+        pydot_graphs[0]
+    )
+)
+
+
+print(
+    "  ✓ Causal graph successfully parsed"
+)
+
+
+# ============================================================================
+# DOWHY IDENTIFICATION
+# ============================================================================
+
+dowhy_columns = [
+    "treatment",
+    "outcome",
+    "market_segment",
+    "category",
+] + numeric_adjustment_cols
+
+
+dowhy_data = (
+    df_causal[dowhy_columns]
+    .copy()
+)
+
+
+causal_model = CausalModel(
+    data=dowhy_data,
+    treatment="treatment",
+    outcome="outcome",
+    graph=causal_graph_dot,
+)
+
+
+identified_estimand = (
+    causal_model.identify_effect(
+        proceed_when_unidentifiable=True
+    )
+)
+
+
+print(
+    "  ✓ DoWhy causal effect identification completed"
+)
+
+print(
+    "  ✓ DML adjustment matrix constructed explicitly"
+)
+
+
+# ============================================================================
+# SECTION 4 — DOUBLE MACHINE LEARNING
+# ============================================================================
+
+print("\n[6/7] Estimating causal effect with EconML LinearDML...")
+print("-" * 80)
+
+
+# ============================================================================
+# OUTCOME NUISANCE MODEL
+# ============================================================================
+
+model_y = LGBMRegressor(
+
+    n_estimators=100,
+
+    learning_rate=0.05,
+
+    max_depth=4,
+
+    num_leaves=15,
+
+    min_child_samples=20,
+
+    subsample=0.90,
+
+    colsample_bytree=0.90,
+
+    random_state=RANDOM_STATE,
+
+    verbosity=-1,
+)
+
+
+# ============================================================================
+# TREATMENT NUISANCE MODEL
+# ============================================================================
+
+model_t = LGBMClassifier(
+
+    n_estimators=100,
+
+    learning_rate=0.05,
+
+    max_depth=4,
+
+    num_leaves=15,
+
+    min_child_samples=20,
+
+    subsample=0.90,
+
+    colsample_bytree=0.90,
+
+    random_state=RANDOM_STATE,
+
+    verbosity=-1,
+)
+
+
+# ============================================================================
+# LINEARDML
+# ============================================================================
+
+dml_model = LinearDML(
+
+    model_y=model_y,
+
+    model_t=model_t,
+
+    discrete_treatment=True,
+
+    cv=3,
+
+    random_state=RANDOM_STATE,
+)
+
+
+print(
+    "  Fitting full validated sample..."
+)
+
+print(
+    f"  X shape: {X_numeric.shape}"
+)
+
+print(
+    f"  T shape: {T.shape}"
+)
+
+print(
+    f"  Y shape: {Y.shape}"
+)
+
+
+# ============================================================================
+# CRITICAL FIX
+# ============================================================================
+#
+# The original code used:
+#
+#     inference='debiased'
+#
+# which is not supported by the EconML version installed in the user's
+# Colab environment.
+#
+# The user's traceback explicitly reported:
+#
+#     valid values are
+#     ['bootstrap', 'auto', 'statsmodels']
+#
+# Therefore this implementation uses:
+#
+#     inference='statsmodels'
+#
+# The invalid X_numeric[:100] fallback has also been completely removed.
+#
+# ============================================================================
+
+dml_model.fit(
+
+    Y,
+
+    T,
+
+    X=X_numeric,
+
+    inference="statsmodels",
+
+)
+
+
+print(
+    "  ✓ DML fit completed successfully"
+)
+
+
+# ============================================================================
+# POST-FIT DIMENSION VALIDATION
+# ============================================================================
+
+if not (
+    len(X_numeric)
+    == len(Y)
+    == len(T)
+):
+
+    raise RuntimeError(
+        "Post-fit dimension validation failed."
+    )
+
+
+# ============================================================================
+# ATE ESTIMATION
+# ============================================================================
+
+ate = float(
+    np.asarray(
+        dml_model.ate(
+            X_numeric
+        )
+    ).squeeze()
+)
+
+
+# ============================================================================
+# 95% CONFIDENCE INTERVAL
+# ============================================================================
+
+ate_lower, ate_upper = (
+    dml_model.ate_interval(
+        X=X_numeric,
+        alpha=0.05,
+    )
+)
+
+
+ate_lower = float(
+    np.asarray(
+        ate_lower
+    ).squeeze()
+)
+
+ate_upper = float(
+    np.asarray(
+        ate_upper
+    ).squeeze()
+)
+
+
+# ============================================================================
+# ECONML INFERENCE OBJECT
+# ============================================================================
+
+ate_inference = (
+    dml_model.ate_inference(
+        X=X_numeric
+    )
+)
+
+
+# ============================================================================
+# STANDARD ERROR
+# ============================================================================
+
 try:
-    dml_model.fit(Y, T, X=X_numeric, inference='debiased')
-    print("✓")
-except Exception as e:
-    print(f"\n  ⚠ Warning during fitting: {str(e)[:100]}")
-    print("  Attempting simplified fitting...")
-    dml_model.fit(Y, T, X=X_numeric[:100])  # Use subset if full fails
 
-# Extract treatment effect estimates
-ate = dml_model.ate(X_numeric)
-ate_lower = dml_model.ate_lower(X_numeric)
-ate_upper = dml_model.ate_upper(X_numeric)
+    se = float(
+        np.asarray(
+            ate_inference.stderr_mean
+        ).squeeze()
+    )
 
-print(f"  ✓ Model fitting completed!")
+except Exception:
+
+    # Fallback based on the confidence interval.
+    #
+    # 95% normal CI:
+    #
+    # estimate ± 1.959964 * SE
+    #
+    # Therefore:
+    #
+    # SE = (upper - lower) / (2 * 1.959964)
+
+    se = float(
+        (
+            ate_upper
+            - ate_lower
+        )
+        /
+        (
+            2
+            * norm.ppf(0.975)
+        )
+    )
+
+
+# ============================================================================
+# P-VALUE
+# ============================================================================
+
+try:
+
+    p_value = float(
+        np.asarray(
+            ate_inference.pvalue()
+        ).squeeze()
+    )
+
+except Exception:
+
+    if se > 0:
+
+        p_value = float(
+            2
+            * norm.sf(
+                abs(
+                    ate / se
+                )
+            )
+        )
+
+    else:
+
+        p_value = np.nan
+
+
+# ============================================================================
+# TEST STATISTIC
+# ============================================================================
+
+if se > 0:
+
+    t_stat = float(
+        ate / se
+    )
+
+else:
+
+    t_stat = np.nan
+
+
+# ============================================================================
+# RELATIVE EFFECT
+# ============================================================================
+
+baseline_mean = float(
+    df_causal["outcome"].mean()
+)
+
+
+if baseline_mean != 0:
+
+    pct_effect = float(
+        (
+            ate
+            /
+            baseline_mean
+        )
+        * 100
+    )
+
+else:
+
+    pct_effect = np.nan
+
+
+# ============================================================================
+# PRINT ATE RESULTS
+# ============================================================================
 
 print("\n  CAUSAL EFFECT ESTIMATES:")
-print("-"*80)
-print(f"  Average Treatment Effect (ATE):      ${ate:.2f}")
-print(f"  95% Confidence Interval:             [${ate_lower:.2f}, ${ate_upper:.2f}]")
-print(f"  Standard Error:                      ${(ate_upper - ate_lower) / 3.92:.2f}")
+print("-" * 80)
 
-# Interpretation
-print(f"\n  INTERPRETATION:")
+print(
+    f"  Average Treatment Effect: "
+    f"${ate:.2f}"
+)
+
+print(
+    f"  95% Confidence Interval: "
+    f"[${ate_lower:.2f}, ${ate_upper:.2f}]"
+)
+
+print(
+    f"  Standard Error: "
+    f"${se:.4f}"
+)
+
+print(
+    f"  Test Statistic: "
+    f"{t_stat:.4f}"
+)
+
+print(
+    f"  p-value: "
+    f"{p_value:.6g}"
+)
+
+
+# ============================================================================
+# INTERPRETATION
+# ============================================================================
+
+print("\n  INTERPRETATION:")
+print("-" * 80)
+
+
 if ate > 0:
-    print(f"  ✓ PROMO_20 INCREASES revenue by ${abs(ate):.2f} per transaction")
-    print(f"    This is a POSITIVE causal effect of the promotion")
-    pct_effect = (abs(ate) / df_causal['outcome'].mean()) * 100
-    print(f"    Relative effect: +{pct_effect:.1f}% of baseline revenue")
-else:
-    print(f"  ✗ PROMO_20 DECREASES revenue by ${abs(ate):.2f} per transaction")
-    print(f"    This suggests the discount cannibalized revenue")
-    pct_effect = (abs(ate) / df_causal['outcome'].mean()) * 100
-    print(f"    Relative effect: {pct_effect:.1f}% of baseline revenue")
 
-# Statistical significance
-se = (ate_upper - ate_lower) / 3.92
-t_stat = ate / se if se > 0 else 0
-p_value = 2 * (1 - norm.cdf(abs(t_stat)))
+    print(
+        f"  ✓ PROMO_20 is estimated to increase "
+        f"daily net revenue by ${abs(ate):.2f}."
+    )
 
-print(f"\n  STATISTICAL SIGNIFICANCE:")
-print(f"  t-statistic:                         {t_stat:.4f}")
-print(f"  p-value:                             {p_value:.6f}")
-if p_value < 0.05:
-    print(f"  ✓ Effect is statistically significant at α=0.05")
+    print(
+        "    Direction of estimated causal effect: POSITIVE"
+    )
+
 else:
-    print(f"  ⚠ Effect is NOT statistically significant at α=0.05")
+
+    print(
+        f"  ✗ PROMO_20 is estimated to decrease "
+        f"daily net revenue by ${abs(ate):.2f}."
+    )
+
+    print(
+        "    Direction of estimated causal effect: NEGATIVE"
+    )
+
+
+print(
+    f"  Relative effect versus sample baseline: "
+    f"{pct_effect:.2f}%"
+)
+
 
 # ============================================================================
-# STEP 5: HETEROGENEOUS TREATMENT EFFECTS (HTE)
+# STATISTICAL SIGNIFICANCE
 # ============================================================================
 
-print("\n  Step 5: Heterogeneous Treatment Effects Analysis")
-print("-"*80)
+print("\n  STATISTICAL SIGNIFICANCE:")
+print("-" * 80)
 
-print("  Computing conditional treatment effects by market segment...")
 
-# Get heterogeneous treatment effects
-cate = dml_model.effect(X_numeric)
+if (
+    np.isfinite(p_value)
+    and p_value < 0.05
+):
 
-# Create results dataframe
+    print(
+        "  ✓ Effect is statistically significant "
+        "at α = 0.05"
+    )
+
+else:
+
+    print(
+        "  ⚠ Effect is not statistically significant "
+        "at α = 0.05"
+    )
+
+
+# ============================================================================
+# SECTION 5 — HETEROGENEOUS TREATMENT EFFECTS
+# ============================================================================
+
+print("\n[7/7] Estimating heterogeneous treatment effects...")
+print("-" * 80)
+
+
+# ============================================================================
+# CATE
+# ============================================================================
+
+cate = np.asarray(
+    dml_model.effect(
+        X_numeric
+    )
+).reshape(-1)
+
+
+# ============================================================================
+# CATE DIMENSION CHECK
+# ============================================================================
+
+if len(cate) != len(df_causal):
+
+    raise RuntimeError(
+        "CATE dimension mismatch:\n"
+        f"  CATE effects: {len(cate):,}\n"
+        f"  Causal rows:  {len(df_causal):,}"
+    )
+
+
+# ============================================================================
+# CATE DATAFRAME
+# ============================================================================
+
 df_cate = df_causal.copy()
-df_cate['cate'] = cate
 
-# Group by market segment
-hte_by_segment = df_cate.groupby('market_segment').agg({
-    'cate': ['mean', 'std', 'min', 'max', 'count']
-}).round(2)
+df_cate["cate"] = cate
 
-print("\n  Conditional Average Treatment Effect (CATE) by Market Segment:")
-print("-"*80)
-print(hte_by_segment.to_string())
-
-# By category
-hte_by_category = df_cate.groupby('category').agg({
-    'cate': ['mean', 'std', 'min', 'max', 'count']
-}).round(2)
-
-print("\n  Conditional Average Treatment Effect (CATE) by Product Category:")
-print("-"*80)
-print(hte_by_category.to_string())
 
 # ============================================================================
-# STEP 6: ROBUSTNESS CHECKS & SENSITIVITY ANALYSIS
+# HTE BY MARKET SEGMENT
 # ============================================================================
 
-print("\n  Step 6: Robustness Checks & Sensitivity Analysis")
-print("-"*80)
+hte_by_segment = (
+    df_cate
+    .groupby("market_segment")["cate"]
+    .agg(
+        [
+            "mean",
+            "std",
+            "min",
+            "max",
+            "count",
+        ]
+    )
+    .round(2)
+)
 
-print("  Performing sensitivity analysis to unobserved confounding...")
 
-# Simple sensitivity: what if there's a confounder we missed?
-# Compute proportional treatment variance reduction needed to flip sign
-V_y = np.var(Y)
-V_t = np.var(T)
-V_yt = np.cov(Y, T)[0, 1]
+print(
+    "\n  Conditional Average Treatment Effect "
+    "by Market Segment:"
+)
 
-# Rotnitzky-Robins bound
-bias_bound = np.sqrt(V_y / (len(Y) * V_t))
-print(f"\n  Sensitivity Bounds:")
-print(f"  • ATE point estimate:                ${ate:.2f}")
-print(f"  • Approximate bias bound:            ${bias_bound:.2f}")
-print(f"  • Range (assuming unknown bias):     [${ate - bias_bound:.2f}, ${ate + bias_bound:.2f}]")
+print("-" * 80)
 
-if ate > bias_bound:
-    print(f"  ✓ Effect is robust to small unmeasured confounding")
+print(
+    hte_by_segment.to_string()
+)
+
+
+# ============================================================================
+# HTE BY CATEGORY
+# ============================================================================
+
+hte_by_category = (
+    df_cate
+    .groupby("category")["cate"]
+    .agg(
+        [
+            "mean",
+            "std",
+            "min",
+            "max",
+            "count",
+        ]
+    )
+    .round(2)
+)
+
+
+print(
+    "\n  Conditional Average Treatment Effect "
+    "by Product Category:"
+)
+
+print("-" * 80)
+
+print(
+    hte_by_category.to_string()
+)
+
+
+# ============================================================================
+# ROBUSTNESS / OVERLAP CHECK
+# ============================================================================
+
+print("\n  Robustness and overlap diagnostics:")
+print("-" * 80)
+
+
+# ============================================================================
+# TREATMENT PREVALENCE
+# ============================================================================
+
+treatment_rate = float(
+    T.mean()
+)
+
+
+print(
+    f"  Treatment prevalence: "
+    f"{treatment_rate:.4f}"
+)
+
+
+# ============================================================================
+# PROPENSITY MODEL
+# ============================================================================
+
+propensity_model = LGBMClassifier(
+
+    n_estimators=100,
+
+    learning_rate=0.05,
+
+    max_depth=4,
+
+    num_leaves=15,
+
+    min_child_samples=20,
+
+    random_state=RANDOM_STATE,
+
+    verbosity=-1,
+
+)
+
+
+propensity_model.fit(
+    X_numeric,
+    T,
+)
+
+
+propensity = (
+    propensity_model
+    .predict_proba(X_numeric)[:, 1]
+)
+
+
+# ============================================================================
+# PROPENSITY SUMMARY
+# ============================================================================
+
+propensity_min = float(
+    np.min(propensity)
+)
+
+propensity_max = float(
+    np.max(propensity)
+)
+
+propensity_q01 = float(
+    np.quantile(
+        propensity,
+        0.01
+    )
+)
+
+propensity_q99 = float(
+    np.quantile(
+        propensity,
+        0.99
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Practical overlap diagnostic.
+#
+# This is deliberately described as an empirical overlap check rather than
+# a proof that the formal positivity assumption holds.
+# ---------------------------------------------------------------------------
+
+overlap_ok = bool(
+    (
+        propensity_min > 0.01
+    )
+    and
+    (
+        propensity_max < 0.99
+    )
+)
+
+
+if overlap_ok:
+
+    positivity_label = (
+        "No severe empirical overlap violation detected"
+    )
+
 else:
-    print(f"  ⚠ Effect could be sensitive to unmeasured confounding")
 
-# Check for positivity violation
-treatment_propensity = T.mean()
-print(f"\n  Positivity Check (overlap):")
-print(f"  • Propensity score (P(T=1)):         {treatment_propensity:.3f}")
-if 0.1 < treatment_propensity < 0.9:
-    print(f"  ✓ Positivity assumption likely satisfied")
-else:
-    print(f"  ⚠ Positivity may be violated (severe imbalance)")
+    positivity_label = (
+        "Potential limited overlap; inspect propensity distribution"
+    )
+
+
+print(
+    f"  Propensity min/max: "
+    f"{propensity_min:.4f} / {propensity_max:.4f}"
+)
+
+print(
+    f"  Propensity 1%/99%: "
+    f"{propensity_q01:.4f} / {propensity_q99:.4f}"
+)
+
+print(
+    f"  Overlap assessment: "
+    f"{positivity_label}"
+)
+
 
 # ============================================================================
-# STEP 7: VISUALIZATIONS
+# SENSITIVITY DIAGNOSTIC
 # ============================================================================
 
-print("\n  Step 7: Creating Visualizations")
-print("-"*80)
+"""
+The original code calculated:
 
-# Figure 1: Causal Graph
-fig, ax = plt.subplots(figsize=(12, 8))
-pos = nx.spring_layout(causal_graph_nx, k=2, iterations=50, seed=42)
+    sqrt(V_y / (n * V_t))
 
-# Draw nodes
-nx.draw_networkx_nodes(causal_graph_nx, pos, node_color='lightblue', 
-                       node_size=3000, ax=ax, alpha=0.9)
-nx.draw_networkx_labels(causal_graph_nx, pos, font_size=9, font_weight='bold', ax=ax)
+and labeled that a "Rotnitzky-Robbins bound."
 
-# Draw edges
-nx.draw_networkx_edges(causal_graph_nx, pos, edge_color='gray', 
-                       arrows=True, arrowsize=20, arrowstyle='->', ax=ax, width=1.5)
+That is not sufficient to claim a formal omitted-variable sensitivity
+bound.
 
-# Highlight treatment → outcome edge
-treatment_outcome_edges = [('treatment', 'outcome')]
-if causal_graph_nx.has_edge('treatment', 'outcome'):
-    nx.draw_networkx_edges(causal_graph_nx, pos, edgelist=treatment_outcome_edges,
-                           edge_color='red', arrows=True, arrowsize=25, 
-                           arrowstyle='->', ax=ax, width=3, alpha=0.8)
+Rather than preserve a misleading statistical label, this implementation
+reports a transparent heuristic diagnostic only.
 
-ax.set_title('Causal Graph: Treatment → Outcome (Confounding Paths)', 
-             fontsize=14, fontweight='bold')
-ax.axis('off')
+It should NOT be interpreted as proof that the estimate is robust to
+arbitrary unmeasured confounding.
+"""
+
+outcome_std = float(
+    np.std(
+        Y,
+        ddof=1
+    )
+)
+
+
+effective_n = max(
+    len(Y),
+    1
+)
+
+
+heuristic_bias_scale = float(
+    outcome_std
+    /
+    np.sqrt(effective_n)
+)
+
+
+robust_to_heuristic_bias = bool(
+    abs(ate)
+    >
+    heuristic_bias_scale
+)
+
+
+print(
+    f"  Heuristic bias scale: "
+    f"${heuristic_bias_scale:.4f}"
+)
+
+print(
+    "  NOTE: this is a diagnostic, "
+    "not a formal omitted-variable sensitivity bound."
+)
+
+
+# ============================================================================
+# VISUALIZATIONS
+# ============================================================================
+
+print("\n  Creating visualizations...")
+print("-" * 80)
+
+
+# ============================================================================
+# FIGURE 1 — CAUSAL GRAPH
+# ============================================================================
+
+fig, ax = plt.subplots(
+    figsize=(12, 8)
+)
+
+
+pos = nx.spring_layout(
+    causal_graph_nx,
+    k=2,
+    iterations=50,
+    seed=RANDOM_STATE,
+)
+
+
+nx.draw_networkx_nodes(
+    causal_graph_nx,
+    pos,
+    node_size=2500,
+    ax=ax,
+    alpha=0.9,
+)
+
+
+nx.draw_networkx_labels(
+    causal_graph_nx,
+    pos,
+    font_size=9,
+    font_weight="bold",
+    ax=ax,
+)
+
+
+nx.draw_networkx_edges(
+    causal_graph_nx,
+    pos,
+    arrows=True,
+    arrowsize=20,
+    ax=ax,
+)
+
+
+if causal_graph_nx.has_edge(
+    "treatment",
+    "outcome",
+):
+
+    nx.draw_networkx_edges(
+        causal_graph_nx,
+        pos,
+        edgelist=[
+            (
+                "treatment",
+                "outcome",
+            )
+        ],
+        arrows=True,
+        arrowsize=25,
+        width=3,
+        ax=ax,
+    )
+
+
+ax.set_title(
+    "Causal Graph: PROMO_20 → Daily Net Revenue",
+    fontsize=14,
+    fontweight="bold",
+)
+
+ax.axis("off")
+
 plt.tight_layout()
-plt.savefig('causal_graph_structure.png', dpi=100, bbox_inches='tight')
-print("  ✓ Saved: causal_graph_structure.png")
-plt.close()
 
-# Figure 2: ATE with Confidence Interval
-fig, ax = plt.subplots(figsize=(10, 6))
+plt.savefig(
+    OUTPUT_DIR
+    /
+    "causal_graph_structure.png",
+    dpi=120,
+    bbox_inches="tight",
+)
 
-effects = ['Naive ATE\n(Unadjusted)', 'Causal ATE\n(DML-Adjusted)']
-point_estimates = [naive_ate, ate]
-cis = [(naive_ate - 100, naive_ate + 100), (ate_lower, ate_upper)]  # Wide CI for naive
-colors = ['#e74c3c', '#2ecc71']
+plt.close(fig)
 
-for i, (effect, point, ci, color) in enumerate(zip(effects, point_estimates, cis, colors)):
-    ax.scatter(point, i, s=300, color=color, zorder=3, edgecolors='black', linewidth=2)
-    ax.plot([ci[0], ci[1]], [i, i], color=color, linewidth=3, alpha=0.7)
-    ax.text(point, i-0.15, f'${point:.2f}', ha='center', fontsize=11, fontweight='bold')
+print(
+    "  ✓ causal_graph_structure.png"
+)
 
-ax.axvline(x=0, color='black', linestyle='--', linewidth=2, alpha=0.5, label='No Effect')
-ax.set_yticks(range(len(effects)))
-ax.set_yticklabels(effects, fontsize=11, fontweight='bold')
-ax.set_xlabel('Average Treatment Effect ($)', fontsize=12, fontweight='bold')
-ax.set_title('Causal vs Naive Estimates: Impact of Confounder Adjustment', 
-             fontsize=14, fontweight='bold')
-ax.grid(axis='x', alpha=0.3)
+
+# ============================================================================
+# FIGURE 2 — NAIVE VS CAUSAL ATE
+# ============================================================================
+
+fig, ax = plt.subplots(
+    figsize=(10, 6)
+)
+
+
+y_positions = np.arange(2)
+
+
+ax.scatter(
+    [
+        naive_ate,
+        ate,
+    ],
+    y_positions,
+    s=180,
+    zorder=3,
+)
+
+
+ax.errorbar(
+    ate,
+    1,
+    xerr=[
+        [
+            ate - ate_lower
+        ],
+        [
+            ate_upper - ate
+        ],
+    ],
+    fmt="none",
+    capsize=6,
+    linewidth=2,
+)
+
+
+ax.axvline(
+    0,
+    linestyle="--",
+    linewidth=1.5,
+)
+
+
+ax.set_yticks(
+    y_positions
+)
+
+
+ax.set_yticklabels(
+    [
+        "Naive ATE (Unadjusted)",
+        "Causal ATE (DML)",
+    ]
+)
+
+
+ax.set_xlabel(
+    "Average Treatment Effect ($)"
+)
+
+ax.set_title(
+    "Naive vs. Causal Treatment Effect",
+    fontsize=14,
+    fontweight="bold",
+)
+
+
 plt.tight_layout()
-plt.savefig('ate_comparison_causal_vs_naive.png', dpi=100, bbox_inches='tight')
-print("  ✓ Saved: ate_comparison_causal_vs_naive.png")
-plt.close()
 
-# Figure 3: Heterogeneous Treatment Effects by Segment
-fig, ax = plt.subplots(figsize=(12, 6))
+plt.savefig(
+    OUTPUT_DIR
+    /
+    "ate_comparison_causal_vs_naive.png",
+    dpi=120,
+    bbox_inches="tight",
+)
 
-segment_means = df_cate.groupby('market_segment')['cate'].mean().sort_values()
-segment_stds = df_cate.groupby('market_segment')['cate'].std()
-segment_names = segment_means.index
+plt.close(fig)
 
-x_pos = np.arange(len(segment_names))
-colors_seg = ['#3498db', '#e74c3c', '#2ecc71']
+print(
+    "  ✓ ate_comparison_causal_vs_naive.png"
+)
 
-bars = ax.bar(x_pos, segment_means.values, yerr=segment_stds.values, 
-              capsize=5, color=colors_seg, edgecolor='black', linewidth=2, alpha=0.8)
 
-ax.axhline(y=ate, color='black', linestyle='--', linewidth=2, label=f'Overall ATE: ${ate:.2f}')
-ax.axhline(y=0, color='gray', linestyle='-', linewidth=1, alpha=0.5)
+# ============================================================================
+# FIGURE 3 — HTE BY MARKET SEGMENT
+# ============================================================================
 
-ax.set_xlabel('Market Segment', fontsize=12, fontweight='bold')
-ax.set_ylabel('Conditional Average Treatment Effect ($)', fontsize=12, fontweight='bold')
-ax.set_title('Heterogeneous Treatment Effects: Which Segments Benefit Most?', 
-             fontsize=14, fontweight='bold')
-ax.set_xticks(x_pos)
-ax.set_xticklabels(segment_names, fontsize=11, fontweight='bold')
-ax.legend(fontsize=11)
-ax.grid(axis='y', alpha=0.3)
+fig, ax = plt.subplots(
+    figsize=(12, 6)
+)
+
+
+segment_means = (
+    hte_by_segment["mean"]
+    .sort_values()
+)
+
+
+segment_stds = (
+    hte_by_segment
+    .loc[
+        segment_means.index,
+        "std"
+    ]
+    .fillna(0)
+)
+
+
+x_positions = np.arange(
+    len(segment_means)
+)
+
+
+ax.bar(
+    x_positions,
+    segment_means.values,
+    yerr=segment_stds.values,
+    capsize=5,
+)
+
+
+ax.axhline(
+    ate,
+    linestyle="--",
+    linewidth=2,
+    label=f"Overall ATE: ${ate:.2f}",
+)
+
+
+ax.axhline(
+    0,
+    linewidth=1,
+)
+
+
+ax.set_xticks(
+    x_positions
+)
+
+
+ax.set_xticklabels(
+    segment_means.index
+)
+
+
+ax.set_xlabel(
+    "Market Segment"
+)
+
+ax.set_ylabel(
+    "Conditional Treatment Effect ($)"
+)
+
+ax.set_title(
+    "Heterogeneous Treatment Effects by Market Segment",
+    fontsize=14,
+    fontweight="bold",
+)
+
+
+ax.legend()
+
 
 plt.tight_layout()
-plt.savefig('hte_by_market_segment.png', dpi=100, bbox_inches='tight')
-print("  ✓ Saved: hte_by_market_segment.png")
-plt.close()
 
-# Figure 4: Distribution of CATE
-fig, ax = plt.subplots(figsize=(12, 6))
+plt.savefig(
+    OUTPUT_DIR
+    /
+    "hte_by_market_segment.png",
+    dpi=120,
+    bbox_inches="tight",
+)
 
-ax.hist(cate, bins=50, color='steelblue', edgecolor='black', alpha=0.7, density=True)
-ax.axvline(ate, color='red', linestyle='--', linewidth=3, label=f'Mean ATE: ${ate:.2f}')
-ax.axvline(np.median(cate), color='green', linestyle='--', linewidth=2, label=f'Median CATE: ${np.median(cate):.2f}')
-ax.axvline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+plt.close(fig)
 
-ax.set_xlabel('Conditional Treatment Effect ($)', fontsize=12, fontweight='bold')
-ax.set_ylabel('Density', fontsize=12, fontweight='bold')
-ax.set_title('Distribution of Heterogeneous Treatment Effects', fontsize=14, fontweight='bold')
-ax.legend(fontsize=11)
-ax.grid(alpha=0.3)
+print(
+    "  ✓ hte_by_market_segment.png"
+)
+
+
+# ============================================================================
+# FIGURE 4 — CATE DISTRIBUTION
+# ============================================================================
+
+fig, ax = plt.subplots(
+    figsize=(12, 6)
+)
+
+
+ax.hist(
+    cate,
+    bins=50,
+    edgecolor="black",
+    alpha=0.75,
+    density=True,
+)
+
+
+ax.axvline(
+    ate,
+    linestyle="--",
+    linewidth=2,
+    label=f"Mean ATE: ${ate:.2f}",
+)
+
+
+ax.axvline(
+    np.median(cate),
+    linestyle="--",
+    linewidth=2,
+    label=(
+        f"Median CATE: "
+        f"${np.median(cate):.2f}"
+    ),
+)
+
+
+ax.axvline(
+    0,
+    linewidth=1,
+)
+
+
+ax.set_xlabel(
+    "Conditional Treatment Effect ($)"
+)
+
+ax.set_ylabel(
+    "Density"
+)
+
+ax.set_title(
+    "Distribution of Conditional Treatment Effects",
+    fontsize=14,
+    fontweight="bold",
+)
+
+
+ax.legend()
+
 
 plt.tight_layout()
-plt.savefig('cate_distribution.png', dpi=100, bbox_inches='tight')
-print("  ✓ Saved: cate_distribution.png")
-plt.close()
 
-# Figure 5: Treatment vs Control Outcome Distribution
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+plt.savefig(
+    OUTPUT_DIR
+    /
+    "cate_distribution.png",
+    dpi=120,
+    bbox_inches="tight",
+)
 
+plt.close(fig)
+
+print(
+    "  ✓ cate_distribution.png"
+)
+
+
+# ============================================================================
+# FIGURE 5 — OUTCOME DISTRIBUTION
+# ============================================================================
+
+fig, axes = plt.subplots(
+    1,
+    2,
+    figsize=(14, 6),
+)
+
+
+# ---------------------------------------------------------------------------
 # Box plot
-data_box = [df_causal[df_causal['treatment']==0]['outcome'], 
-            df_causal[df_causal['treatment']==1]['outcome']]
-bp = ax1.boxplot(data_box, labels=['Control', 'PROMO_20'], patch_artist=True)
-for patch, color in zip(bp['boxes'], ['lightblue', 'lightcoral']):
-    patch.set_facecolor(color)
-ax1.set_ylabel('Daily Net Revenue ($)', fontsize=11, fontweight='bold')
-ax1.set_title('Treatment vs Control: Outcome Distribution (Unadjusted)', 
-              fontsize=12, fontweight='bold')
-ax1.grid(axis='y', alpha=0.3)
+# ---------------------------------------------------------------------------
 
-# Density plot
-ax2.hist(df_causal[df_causal['treatment']==0]['outcome'], bins=40, 
-         alpha=0.6, label='Control', color='steelblue', density=True, edgecolor='black')
-ax2.hist(df_causal[df_causal['treatment']==1]['outcome'], bins=40, 
-         alpha=0.6, label='PROMO_20', color='coral', density=True, edgecolor='black')
-ax2.set_xlabel('Daily Net Revenue ($)', fontsize=11, fontweight='bold')
-ax2.set_ylabel('Density', fontsize=11, fontweight='bold')
-ax2.set_title('Outcome Distribution Comparison', fontsize=12, fontweight='bold')
-ax2.legend(fontsize=10)
-ax2.grid(alpha=0.3)
+axes[0].boxplot(
+    [
+        control_outcome.to_numpy(),
+        treated_outcome.to_numpy(),
+    ],
+    labels=[
+        "Control",
+        "PROMO_20",
+    ],
+)
+
+
+axes[0].set_ylabel(
+    "Daily Net Revenue ($)"
+)
+
+axes[0].set_title(
+    "Treatment vs Control Outcome Distribution"
+)
+
+
+# ---------------------------------------------------------------------------
+# Histogram
+# ---------------------------------------------------------------------------
+
+axes[1].hist(
+    control_outcome,
+    bins=40,
+    alpha=0.6,
+    label="Control",
+    density=True,
+    edgecolor="black",
+)
+
+
+axes[1].hist(
+    treated_outcome,
+    bins=40,
+    alpha=0.6,
+    label="PROMO_20",
+    density=True,
+    edgecolor="black",
+)
+
+
+axes[1].set_xlabel(
+    "Daily Net Revenue ($)"
+)
+
+axes[1].set_ylabel(
+    "Density"
+)
+
+axes[1].set_title(
+    "Outcome Distribution Comparison"
+)
+
+axes[1].legend()
+
 
 plt.tight_layout()
-plt.savefig('outcome_distribution_comparison.png', dpi=100, bbox_inches='tight')
-print("  ✓ Saved: outcome_distribution_comparison.png")
-plt.close()
 
-# Figure 6: Confounder Balance (Standardized Mean Difference)
-fig, ax = plt.subplots(figsize=(12, 8))
+plt.savefig(
+    OUTPUT_DIR
+    /
+    "outcome_distribution_comparison.png",
+    dpi=120,
+    bbox_inches="tight",
+)
 
-# Calculate standardized mean difference for key confounders
-smd_list = []
-confounder_names_short = []
+plt.close(fig)
 
-for col in numeric_cols[:8]:  # Top 8 confounders
-    try:
-        mean_t1 = df_causal[df_causal['treatment']==1][col].mean()
-        mean_t0 = df_causal[df_causal['treatment']==0][col].mean()
-        std_pooled = np.sqrt((df_causal[df_causal['treatment']==1][col].std()**2 + 
-                              df_causal[df_causal['treatment']==0][col].std()**2) / 2)
-        
-        if std_pooled > 0:
-            smd = (mean_t1 - mean_t0) / std_pooled
-            smd_list.append(abs(smd))
-            confounder_names_short.append(col[:20])  # Truncate long names
-    except:
-        pass
+print(
+    "  ✓ outcome_distribution_comparison.png"
+)
 
-if smd_list:
-    colors_balance = ['#2ecc71' if s < 0.1 else '#f39c12' if s < 0.2 else '#e74c3c' for s in smd_list]
-    ax.barh(confounder_names_short, smd_list, color=colors_balance, edgecolor='black', linewidth=1.5, alpha=0.8)
-    ax.axvline(x=0.1, color='green', linestyle='--', linewidth=2, alpha=0.7, label='Good Balance (SMD<0.1)')
-    ax.axvline(x=0.2, color='orange', linestyle='--', linewidth=2, alpha=0.7, label='Moderate (SMD<0.2)')
-    
-    ax.set_xlabel('Absolute Standardized Mean Difference', fontsize=11, fontweight='bold')
-    ax.set_title('Confounder Balance: Treatment vs Control', fontsize=14, fontweight='bold')
-    ax.legend(fontsize=10)
-    ax.grid(axis='x', alpha=0.3)
+
+# ============================================================================
+# FIGURE 6 — STANDARDIZED MEAN DIFFERENCE
+# ============================================================================
+
+smd_rows = []
+
+
+for column in numeric_adjustment_cols:
+
+    treated_values = (
+        df_causal
+        .loc[
+            T == 1,
+            column
+        ]
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+    control_values = (
+        df_causal
+        .loc[
+            T == 0,
+            column
+        ]
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+
+    treated_variance = np.var(
+        treated_values,
+        ddof=1,
+    )
+
+    control_variance = np.var(
+        control_values,
+        ddof=1,
+    )
+
+
+    pooled_std = np.sqrt(
+        (
+            treated_variance
+            +
+            control_variance
+        )
+        /
+        2
+    )
+
+
+    if pooled_std > 0:
+
+        smd = (
+            np.mean(treated_values)
+            -
+            np.mean(control_values)
+        ) / pooled_std
+
+    else:
+
+        smd = 0.0
+
+
+    smd_rows.append(
+        (
+            column,
+            abs(float(smd)),
+        )
+    )
+
+
+smd_df = pd.DataFrame(
+    smd_rows,
+    columns=[
+        "variable",
+        "absolute_smd",
+    ],
+).sort_values(
+    "absolute_smd"
+)
+
+
+fig, ax = plt.subplots(
+    figsize=(12, 7)
+)
+
+
+ax.barh(
+    smd_df["variable"],
+    smd_df["absolute_smd"],
+)
+
+
+ax.axvline(
+    0.1,
+    linestyle="--",
+    linewidth=2,
+    label="SMD = 0.10",
+)
+
+
+ax.axvline(
+    0.2,
+    linestyle="--",
+    linewidth=2,
+    label="SMD = 0.20",
+)
+
+
+ax.set_xlabel(
+    "Absolute Standardized Mean Difference"
+)
+
+ax.set_title(
+    "Pre-Adjustment Covariate Balance",
+    fontsize=14,
+    fontweight="bold",
+)
+
+
+ax.legend()
+
 
 plt.tight_layout()
-plt.savefig('confounder_balance_smd.png', dpi=100, bbox_inches='tight')
-print("  ✓ Saved: confounder_balance_smd.png")
-plt.close()
+
+plt.savefig(
+    OUTPUT_DIR
+    /
+    "confounder_balance_smd.png",
+    dpi=120,
+    bbox_inches="tight",
+)
+
+plt.close(fig)
+
+print(
+    "  ✓ confounder_balance_smd.png"
+)
+
 
 # ============================================================================
-# STEP 8: SAVE CAUSAL RESULTS
+# FIGURE 7 — PROPENSITY OVERLAP
 # ============================================================================
 
-print("\n  Step 8: Saving Causal Inference Results")
-print("-"*80)
+fig, ax = plt.subplots(
+    figsize=(12, 6)
+)
+
+
+ax.hist(
+    propensity[T == 0],
+    bins=40,
+    alpha=0.6,
+    label="Control",
+    density=True,
+)
+
+
+ax.hist(
+    propensity[T == 1],
+    bins=40,
+    alpha=0.6,
+    label="PROMO_20",
+    density=True,
+)
+
+
+ax.set_xlabel(
+    "Estimated Propensity P(T=1 | X)"
+)
+
+ax.set_ylabel(
+    "Density"
+)
+
+ax.set_title(
+    "Treatment Propensity / Overlap Check",
+    fontsize=14,
+    fontweight="bold",
+)
+
+
+ax.legend()
+
+
+plt.tight_layout()
+
+plt.savefig(
+    OUTPUT_DIR
+    /
+    "propensity_overlap.png",
+    dpi=120,
+    bbox_inches="tight",
+)
+
+plt.close(fig)
+
+print(
+    "  ✓ propensity_overlap.png"
+)
+
+
+# ============================================================================
+# EXPORT DATA
+# ============================================================================
+
+print("\n  Saving output artifacts...")
+print("-" * 80)
+
+
+# ============================================================================
+# CATE CSV
+# ============================================================================
+
+df_cate_export = df_cate[
+    [
+        "transaction_date",
+        "store_id",
+        "treatment",
+        "outcome",
+        "cate",
+        "market_segment",
+        "category",
+    ]
+].copy()
+
+
+df_cate_export.to_csv(
+    OUTPUT_DIR
+    /
+    "heterogeneous_treatment_effects.csv",
+    index=False,
+)
+
+
+print(
+    "  ✓ heterogeneous_treatment_effects.csv"
+)
+
+
+# ============================================================================
+# SMD CSV
+# ============================================================================
+
+smd_df.to_csv(
+    OUTPUT_DIR
+    /
+    "confounder_balance_smd.csv",
+    index=False,
+)
+
+
+print(
+    "  ✓ confounder_balance_smd.csv"
+)
+
+
+# ============================================================================
+# JSON RESULTS
+# ============================================================================
 
 causal_results = {
-    'model_type': 'Double Machine Learning (DML) with LightGBM',
-    'estimation_method': 'EconML LinearDML',
-    'average_treatment_effect': {
-        'point_estimate': float(ate),
-        'ci_lower': float(ate_lower),
-        'ci_upper': float(ate_upper),
-        'standard_error': float(se),
-        't_statistic': float(t_stat),
-        'p_value': float(p_value),
-        'is_significant_05': bool(p_value < 0.05)
+
+    "model_type":
+        "Double Machine Learning with "
+        "LightGBM nuisance models",
+
+    "estimation_method":
+        "EconML LinearDML",
+
+    "inference_method":
+        "statsmodels",
+
+    "data_source":
+        data_source,
+
+    "source_table":
+        (
+            f"{PROJECT_ID}."
+            f"{DATASET_NAME}."
+            f"{TABLE_NAME}"
+        ),
+
+    "rows_loaded":
+        int(len(df_analytics)),
+
+    "rows_analyzed":
+        int(len(df_causal)),
+
+    "rows_dropped_for_required_fields":
+        int(rows_dropped),
+
+    "sample_sizes": {
+
+        "control":
+            control_count,
+
+        "treatment":
+            treated_count,
+
+        "total":
+            int(len(T)),
     },
-    'naive_ate': {
-        'point_estimate': float(naive_ate),
-        'description': 'Unadjusted difference in means (biased)'
+
+    "treatment_prevalence":
+        treatment_rate,
+
+    "adjustment_variables":
+        (
+            numeric_adjustment_cols
+            +
+            categorical_adjustment_cols
+        ),
+
+    "model_feature_count":
+        int(X_numeric.shape[1]),
+
+    "average_treatment_effect": {
+
+        "point_estimate":
+            ate,
+
+        "ci_lower":
+            ate_lower,
+
+        "ci_upper":
+            ate_upper,
+
+        "standard_error":
+            se,
+
+        "test_statistic":
+            t_stat,
+
+        "p_value":
+            p_value,
+
+        "is_significant_05":
+            bool(
+                np.isfinite(p_value)
+                and
+                p_value < 0.05
+            ),
     },
-    'heterogeneous_effects': {
-        'by_market_segment': {
-            segment: float(df_cate[df_cate['market_segment']==segment]['cate'].mean())
-            for segment in df_cate['market_segment'].unique()
-        },
-        'by_category': {
-            category: float(df_cate[df_cate['category']==category]['cate'].mean())
-            for category in df_cate['category'].unique()
-        }
+
+    "naive_ate": {
+
+        "point_estimate":
+            naive_ate,
+
+        "description":
+            (
+                "Unadjusted difference in means; "
+                "not a causal estimate."
+            ),
     },
-    'sample_sizes': {
-        'control': int((df_causal['treatment']==0).sum()),
-        'treatment': int((df_causal['treatment']==1).sum()),
-        'total': len(df_causal)
+
+    "relative_effect_percent":
+        pct_effect,
+
+    "heterogeneous_effects": {
+
+        "by_market_segment":
+            {
+                str(key): float(value)
+                for key, value
+                in (
+                    df_cate
+                    .groupby(
+                        "market_segment"
+                    )["cate"]
+                    .mean()
+                    .items()
+                )
+            },
+
+        "by_category":
+            {
+                str(key): float(value)
+                for key, value
+                in (
+                    df_cate
+                    .groupby(
+                        "category"
+                    )["cate"]
+                    .mean()
+                    .items()
+                )
+            },
     },
-    'confounders_used': confounders[:10],  # Top 10
-    'interpretation': {
-        'effect_direction': 'Positive (beneficial)' if ate > 0 else 'Negative (harmful)',
-        'effect_magnitude': f'${abs(ate):.2f} per transaction',
-        'relative_effect_pct': f'{pct_effect:.1f}% of baseline revenue',
-        'statistical_significance': 'Yes (p<0.05)' if p_value < 0.05 else 'No (p≥0.05)'
+
+    "overlap_check": {
+
+        "propensity_min":
+            propensity_min,
+
+        "propensity_max":
+            propensity_max,
+
+        "propensity_q01":
+            propensity_q01,
+
+        "propensity_q99":
+            propensity_q99,
+
+        "assessment":
+            positivity_label,
     },
-    'sensitivity_analysis': {
-        'bias_bound': float(bias_bound),
-        'robust_to_unmeasured_confounding': bool(ate > bias_bound),
-        'positivity_violation_risk': 'Low' if 0.1 < treatment_propensity < 0.9 else 'High'
+
+    "sensitivity_analysis": {
+
+        "heuristic_bias_scale":
+            heuristic_bias_scale,
+
+        "robust_to_heuristic_bias_scale":
+            robust_to_heuristic_bias,
+
+        "interpretation":
+            (
+                "Diagnostic only. This is NOT a formal "
+                "omitted-variable sensitivity bound."
+            ),
     },
-    'timestamp': datetime.now().isoformat()
+
+    "timestamp":
+        datetime.now().isoformat(),
 }
 
-with open('causal_inference_results.json', 'w') as f:
-    json.dump(causal_results, f, indent=2)
-print("  ✓ Saved: causal_inference_results.json")
 
-# Save detailed CATE data
-df_cate_export = df_cate[['treatment', 'outcome', 'cate', 'market_segment', 'category']].copy()
-df_cate_export.to_csv('heterogeneous_treatment_effects.csv', index=False)
-print("  ✓ Saved: heterogeneous_treatment_effects.csv")
+with open(
+    OUTPUT_DIR
+    /
+    "causal_inference_results.json",
+    "w",
+    encoding="utf-8",
+) as f:
+
+    json.dump(
+        causal_results,
+        f,
+        indent=2,
+        allow_nan=False,
+    )
+
+
+print(
+    "  ✓ causal_inference_results.json"
+)
+
 
 # ============================================================================
-# FINAL SUMMARY
+# FINAL EXECUTIVE SUMMARY
 # ============================================================================
 
-print("\n" + "="*80)
-print("✓ PHASE 3A COMPLETE: CAUSAL INFERENCE MODELING")
-print("="*80)
+print("\n" + "=" * 80)
 
-print(f"""
-╔════════════════════════════════════════════════════════════════════════════╗
-║                    CAUSAL INFERENCE EXECUTIVE SUMMARY                     ║
-╠════════════════════════════════════════════════════════════════════════════╣
-║                                                                            ║
-║  TREATMENT EFFECT OF PROMO_20 ON DAILY NET REVENUE:                       ║
-║                                                                            ║
-║    Causal ATE (DML-Adjusted):  ${ate:>15.2f}                              ║
-║    95% Confidence Interval:     [${ate_lower:>10.2f}, ${ate_upper:>10.2f}]     ║
-║    p-value:                     {p_value:>20.6f}                      ║
-║    Statistically Significant:   {'Yes ✓' if p_value < 0.05 else 'No ✗':<10s}                  ║
-║                                                                            ║
-║  COMPARISON TO NAIVE ESTIMATE:                                            ║
-║                                                                            ║
-║    Naive ATE (Unadjusted):      ${naive_ate:>15.2f}                       ║
-║    Bias from Confounding:       ${ate - naive_ate:>15.2f}                 ║
-║    Bias Direction:              {'Downward' if ate > naive_ate else 'Upward':<10s}            ║
-║                                                                            ║
-║  BUSINESS INTERPRETATION:                                                 ║
-║                                                                            ║
-║    The PROMO_20 promotion CAUSES a ${abs(ate):>8.2f} {'increase' if ate > 0 else 'decrease'} in           ║
-║    daily net revenue per transaction, after controlling for              ║
-║    confounding factors like product category, market segment,             ║
-║    and baseline pricing.                                                  ║
-║                                                                            ║
-║    Relative to baseline: {pct_effect:>3.1f}% {'increase' if ate > 0 else 'decrease'}                                   ║
-║                                                                            ║
-║  HETEROGENEOUS EFFECTS:                                                   ║
-║                                                                            ║
-""")
+print(
+    "✓ PHASE 3A COMPLETE: "
+    "CAUSAL INFERENCE MODELING"
+)
 
-for segment in df_cate['market_segment'].unique():
-    segment_cate = df_cate[df_cate['market_segment']==segment]['cate'].mean()
-    print(f"║    • {segment:15s}: ${segment_cate:>8.2f}  (n={len(df_cate[df_cate['market_segment']==segment]):>5d})          ║")
+print("=" * 80)
 
-print(f"""║                                                                            ║
-║  SENSITIVITY & ROBUSTNESS:                                                ║
-║                                                                            ║
-║    Robust to unmeasured confounding:  {'Yes ✓' if ate > bias_bound else 'No ⚠':<10s}              ║
-║    Approximate bias bound:             ${bias_bound:>10.2f}                      ║
-║    Positivity assumption:              {'OK' if 0.1 < treatment_propensity < 0.9 else 'VIOLATED':<10s}              ║
-║                                                                            ║
-║  DELIVERABLES:                                                            ║
-║                                                                            ║
-║    ✓ causal_graph_structure.png        (Graph visualization)             ║
-║    ✓ ate_comparison_causal_vs_naive.png (Effect comparison)              ║
-║    ✓ hte_by_market_segment.png         (Heterogeneous effects)           ║
-║    ✓ cate_distribution.png             (CATE histogram)                  ║
-║    ✓ outcome_distribution_comparison.png (Distribution analysis)         ║
-║    ✓ confounder_balance_smd.png        (Balance check)                   ║
-║    ✓ causal_inference_results.json     (Quantitative summary)            ║
-║    ✓ heterogeneous_treatment_effects.csv (Individual effects)            ║
-║                                                                            ║
-╚════════════════════════════════════════════════════════════════════════════╝
-""")
+print(
+    f"""
+CAUSAL INFERENCE EXECUTIVE SUMMARY
+----------------------------------
 
-print("\n" + "="*80)
-print("✓ PHASE 3A DELIVERABLES READY FOR PHASE 3B & 3C")
-print("="*80 + "\n")
+Treatment:
+    PROMO_20 vs CONTROL
 
-# End of Phase 3A
+Outcome:
+    Daily Net Revenue
+
+Sample:
+    {len(df_causal):,} observations
+
+Treatment:
+    {treated_count:,}
+
+Control:
+    {control_count:,}
+
+DML Causal ATE:
+    ${ate:.2f}
+
+95% Confidence Interval:
+    [${ate_lower:.2f}, ${ate_upper:.2f}]
+
+Standard Error:
+    ${se:.4f}
+
+Test Statistic:
+    {t_stat:.4f}
+
+p-value:
+    {p_value:.6g}
+
+Statistically Significant:
+    {"YES" if np.isfinite(p_value) and p_value < 0.05 else "NO"}
+
+Relative Effect:
+    {pct_effect:.2f}%
+
+Naive ATE:
+    ${naive_ate:.2f}
+
+Difference:
+    ${ate - naive_ate:.2f}
+
+Empirical Overlap:
+    {positivity_label}
+
+Output Directory:
+    {OUTPUT_DIR}
+"""
+)
+
+
+# ============================================================================
+# LIST OUTPUT ARTIFACTS
+# ============================================================================
+
+print(
+    "Generated artifacts:"
+)
+
+for output_file in sorted(
+    OUTPUT_DIR.iterdir()
+):
+
+    if output_file.is_file():
+
+        size_kb = (
+            output_file.stat().st_size
+            /
+            1024
+        )
+
+        print(
+            f"  ✓ {output_file.name:<45s}"
+            f"{size_kb:>10.1f} KB"
+        )
+
+
+print("\n" + "=" * 80)
+
+print(
+    "✓ PHASE 3A DELIVERABLES READY FOR PHASE 3B & 3C"
+)
+
+print("=" * 80)
